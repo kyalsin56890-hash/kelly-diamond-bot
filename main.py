@@ -57,8 +57,46 @@ def db():
         )
     """)
 
+       
+    columns = {
+        row[1] for row in
+        conn.execute("PRAGMA table_info(orders)").fetchall()
+    }
+
+    if "supplier_cost" not in columns:
+        conn.execute(
+            "ALTER TABLE orders ADD COLUMN supplier_cost INTEGER"
+        )
+
+    if "profit" not in columns:
+        conn.execute(
+            "ALTER TABLE orders ADD COLUMN profit INTEGER"
+        )
+
     conn.execute("""
-        INSERT OR IGNORE INTO product_prices
+        CREATE TABLE IF NOT EXISTS wallet (
+            id INTEGER PRIMARY KEY CHECK (id = 1),
+            balance INTEGER NOT NULL DEFAULT 0
+        )
+    """)
+
+    conn.execute("""
+        INSERT OR IGNORE INTO wallet (id, balance)
+        VALUES (1, 0)
+    """)
+
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS balance_transactions (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            transaction_type TEXT NOT NULL,
+            amount INTEGER NOT NULL,
+            note TEXT,
+            order_id INTEGER,
+            created_at TEXT NOT NULL
+        )
+    """)
+    conn.execute("""
+ INSERT OR IGNORE INTO product_prices
         (category, package, price)
         SELECT 'normal', package, price FROM prices
     """)
