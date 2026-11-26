@@ -530,13 +530,13 @@ async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
             ])
         )
         return
-
-    if data in ("balance", "settings"):
+if data in ("balance", "settings"):
         await q.edit_message_text(
             "This section will be developed next.",
             reply_markup=InlineKeyboardMarkup([
                 [InlineKeyboardButton("⬅️ Back", callback_data="home")]
             ])
+    
         )
 
 
