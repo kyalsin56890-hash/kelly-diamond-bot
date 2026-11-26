@@ -1,6 +1,8 @@
-
+    
 import os
 import sqlite3
+from datetime import datetime
+
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     Application, CommandHandler, CallbackQueryHandler,
@@ -42,7 +44,19 @@ def db():
         )
     """)
 
-    # Preserve existing Normal Diamond prices
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS orders (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            player_id TEXT NOT NULL,
+            server_id TEXT NOT NULL,
+            category TEXT NOT NULL,
+            package TEXT NOT NULL,
+            price INTEGER NOT NULL,
+            status TEXT NOT NULL DEFAULT 'pending',
+            created_at TEXT NOT NULL
+        )
+    """)
+
     conn.execute("""
         INSERT OR IGNORE INTO product_prices
         (category, package, price)
@@ -59,10 +73,10 @@ def main_menu():
         [InlineKeyboardButton("💜 Double Diamonds", callback_data="cat:double")],
         [InlineKeyboardButton("🎫 Weekly Pass", callback_data="cat:weekly")],
         [InlineKeyboardButton("🌙 Twilight Pass", callback_data="cat:twilight")],
-        [InlineKeyboardButton("📝 Order Drafts", callback_data="orders"),
-         InlineKeyboardButton("💰 Balance", callback_data="balance")],
-        [InlineKeyboardButton("📊 Sales Records", callback_data="sales"),
-         InlineKeyboardButton("⚙️ Settings", callback_data="settings")]
+        [InlineKeyboardButton("📝 Order Management", callback_data="orders")],
+        [InlineKeyboardButton("💰 Balance", callback_data="balance"),
+         InlineKeyboardButton("📊 Sales Records", callback_data="sales")],
+        [InlineKeyboardButton("⚙️ Settings", callback_data="settings")]
     ])
 
 
@@ -76,6 +90,23 @@ def product_menu(category):
     ])
 
 
+def orders_menu():
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("➕ Create New Order", callback_data="order_new")],
+        [InlineKeyboardButton("⏳ Pending Orders", callback_data="order_list:pending")],
+        [InlineKeyboardButton("✅ Completed Orders", callback_data="order_list:completed")],
+        [InlineKeyboardButton("❌ Cancelled Orders", callback_data="order_list:cancelled")],
+        [InlineKeyboardButton("📚 All Order History", callback_data="order_list:all")],
+        [InlineKeyboardButton("⬅️ Back", callback_data="home")]
+    ])
+
+
+def back_orders():
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("⬅️ Order Management", callback_data="orders")]
+    ])
+
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != ADMIN_ID:
         await update.message.reply_text("Sorry, this bot is private.")
@@ -85,6 +116,55 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "Welcome to Kelly's Diamond Bot! 💜\n\n👑 Admin Dashboard",
         reply_markup=main_menu()
+    )
+
+
+async def show_order(update, order_id):
+    conn = db()
+    row = conn.execute(
+        "SELECT player_id, server_id, category, package, price, status, created_at "
+        "FROM orders WHERE id = ?",
+        (order_id,)
+    ).fetchone()
+    conn.close()
+
+    if not row:
+        await update.edit_message_text("Order not found.", reply_markup=back_orders())
+        return
+
+    player, server, category, package, price, status, created = row
+
+    status_text = {
+        "pending": "⏳ Pending",
+        "completed": "✅ Completed",
+        "cancelled": "❌ Cancelled"
+    }.get(status, status)
+
+    keyboard = []
+
+    if status == "pending":
+        keyboard.append([
+            InlineKeyboardButton("✅ Complete", callback_data=f"order_status:{order_id}:completed"),
+            InlineKeyboardButton("❌ Cancel", callback_data=f"order_status:{order_id}:cancelled")
+        ])
+
+    keyboard.append([
+        InlineKeyboardButton("⬅️ Order List", callback_data="order_list:all")
+    ])
+    keyboard.append([
+        InlineKeyboardButton("🏠 Main Menu", callback_data="home")
+    ])
+
+    await update.edit_message_text(
+        f"📝 ORDER #{order_id}\n\n"
+        f"👤 Player ID: {player}\n"
+        f"🌐 Server ID: {server}\n"
+        f"📦 Category: {CATEGORIES.get(category, category)}\n"
+        f"💎 Package: {package}\n"
+        f"💰 Price: {price:,} Ks\n"
+        f"📌 Status: {status_text}\n"
+        f"🕒 Created: {created}",
+        reply_markup=InlineKeyboardMarkup(keyboard)
     )
 
 
@@ -106,8 +186,234 @@ async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
+    if data == "orders":
+        context.user_data.clear()
+        await q.edit_message_text(
+            "📝 ORDER MANAGEMENT\n\nSelect an option:",
+            reply_markup=orders_menu()
+        )
+        return
+
+    if data == "order_new":
+        context.user_data.clear()
+        context.user_data["action"] = "order_player"
+        await q.edit_message_text(
+            "➕ CREATE NEW ORDER\n\nEnter Player ID:",
+            reply_markup=back_orders()
+        )
+        return
+
+    if data.startswith("order_list:"):
+        status = data.split(":", 1)[1]
+
+        conn = db()
+
+        if status == "all":
+            rows = conn.execute(
+                "SELECT id, player_id, package, price, status "
+                "FROM orders ORDER BY id DESC LIMIT 30"
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                "SELECT id, player_id, package, price, status "
+                "FROM orders WHERE status = ? ORDER BY id DESC LIMIT 30",
+                (status,)
+            ).fetchall()
+
+        conn.close()
+
+        if not rows:
+            await q.edit_message_text(
+                "No orders found.",
+                reply_markup=orders_menu()
+            )
+            return
+
+        keyboard = []
+        msg = "📚 ORDER HISTORY\n\n"
+
+        for oid, player, package, price, state in rows:
+            emoji = {
+                "pending": "⏳",
+                "completed": "✅",
+                "cancelled": "❌"
+            }.get(state, "")
+
+            msg += f"{emoji} #{oid} | {package}\n"
+            msg += f"Player: {player} | {price:,} Ks\n\n"
+
+            keyboard.append([
+                InlineKeyboardButton(
+                    f"Order #{oid} - {emoji}",
+                    callback_data=f"order_view:{oid}"
+                )
+            ])
+
+        keyboard.append([
+            InlineKeyboardButton("⬅️ Back", callback_data="orders")
+        ])
+
+        await q.edit_message_text(
+            msg,
+            reply_markup=InlineKeyboardMarkup(keyboard)
+        )
+        return
+
+    if data.startswith("order_view:"):
+        order_id = int(data.split(":")[1])
+        await show_order(q, order_id)
+        return
+
+    if data.startswith("order_status:"):
+        _, order_id, new_status = data.split(":")
+        order_id = int(order_id)
+
+        if new_status not in ("completed", "cancelled"):
+            return
+
+        conn = db()
+        conn.execute(
+            "UPDATE orders SET status = ? "
+            "WHERE id = ? AND status = 'pending'",
+            (new_status, order_id)
+        )
+        conn.commit()
+        conn.close()
+
+        await show_order(q, order_id)
+        return
+
+    if data.startswith("ordercat:"):
+        category = data.split(":")[1]
+
+        if category not in CATEGORIES:
+            return
+
+        context.user_data["category"] = category
+
+        conn = db()
+        rows = conn.execute(
+            "SELECT id, package, price FROM product_prices "
+            "WHERE category = ? ORDER BY id",
+            (category,)
+        ).fetchall()
+        conn.close()
+
+        if not rows:
+            await q.edit_message_text(
+                "No packages available in this category.",
+                reply_markup=back_orders()
+            )
+            return
+
+        keyboard = []
+
+        for pid, package, price in rows:
+            keyboard.append([
+                InlineKeyboardButton(
+                    f"{package} — {price:,} Ks",
+                    callback_data=f"orderpkg:{pid}"
+                )
+            ])
+
+        keyboard.append([
+            InlineKeyboardButton("⬅️ Back", callback_data="order_new")
+        ])
+
+        await q.edit_message_text(
+            f"📦 Select Package\n\n{CATEGORIES[category]}",
+            reply_markup=InlineKeyboardMarkup(keyboard)
+        )
+        return
+
+    if data.startswith("orderpkg:"):
+        pid = int(data.split(":")[1])
+
+        conn = db()
+        row = conn.execute(
+            "SELECT category, package, price FROM product_prices WHERE id = ?",
+            (pid,)
+        ).fetchone()
+        conn.close()
+
+        if not row:
+            await q.edit_message_text(
+                "Package not found. Please try again.",
+                reply_markup=back_orders()
+            )
+            return
+
+        category, package, price = row
+
+        context.user_data["order_category"] = category
+        context.user_data["order_package"] = package
+        context.user_data["order_price"] = price
+
+        await q.edit_message_text(
+            f"📦 {package}\n"
+            f"💰 {price:,} Ks\n\n"
+            f"Player ID: {context.user_data['player_id']}\n"
+            f"Server ID: {context.user_data['server_id']}\n\n"
+            "Confirm this order?",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("✅ Confirm Order", callback_data="order_confirm")],
+                [InlineKeyboardButton("❌ Cancel", callback_data="orders")]
+            ])
+        )
+        return
+
+    if data == "order_confirm":
+        if not all(k in context.user_data for k in (
+            "player_id", "server_id", "order_category",
+            "order_package", "order_price"
+        )):
+            await q.edit_message_text(
+                "Order information missing. Please start again.",
+                reply_markup=orders_menu()
+            )
+            return
+
+        info = context.user_data
+
+        conn = db()
+        cursor = conn.execute(
+            "INSERT INTO orders "
+            "(player_id, server_id, category, package, price, status, created_at) "
+            "VALUES (?, ?, ?, ?, ?, 'pending', ?)",
+            (
+                info["player_id"],
+                info["server_id"],
+                info["order_category"],
+                info["order_package"],
+                info["order_price"],
+                datetime.now().strftime("%Y-%m-%d %H:%M")
+            )
+        )
+
+        order_id = cursor.lastrowid
+        conn.commit()
+        conn.close()
+
+        package = info["order_package"]
+        price = info["order_price"]
+        context.user_data.clear()
+
+        await q.edit_message_text(
+            f"✅ ORDER CREATED SUCCESSFULLY!\n\n"
+            f"📝 Order ID: #{order_id}\n"
+            f"📦 Package: {package}\n"
+            f"💰 Price: {price:,} Ks\n"
+            f"📌 Status: ⏳ Pending",
+            reply_markup=orders_menu()
+        )
+        return
+
     if data.startswith("cat:"):
         category = data.split(":", 1)[1]
+
+        if category not in CATEGORIES:
+            return
+
         context.user_data.clear()
         await q.edit_message_text(
             f"{CATEGORIES[category]}\n\nPRICE MANAGEMENT",
@@ -140,8 +446,9 @@ async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
             ).fetchall()
             conn.close()
 
+            msg = f"📋 {CATEGORIES[category]} PRICE LIST\n\n"
+
             if rows:
-                msg = f"📋 {CATEGORIES[category]} PRICE LIST\n\n"
                 for package, price in rows:
                     msg += f"• {package} — {price:,} Ks\n"
             else:
@@ -168,7 +475,25 @@ async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         return
 
-    if data in ("orders", "balance", "sales", "settings"):
+    if data == "sales":
+        conn = db()
+        count, total = conn.execute(
+            "SELECT COUNT(*), COALESCE(SUM(price), 0) "
+            "FROM orders WHERE status = 'completed'"
+        ).fetchone()
+        conn.close()
+
+        await q.edit_message_text(
+            f"📊 SALES RECORDS\n\n"
+            f"✅ Completed Orders: {count}\n"
+            f"💰 Completed Order Total: {total:,} Ks",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("⬅️ Back", callback_data="home")]
+            ])
+        )
+        return
+
+    if data in ("balance", "settings"):
         await q.edit_message_text(
             "This section will be developed next.",
             reply_markup=InlineKeyboardMarkup([
@@ -182,6 +507,7 @@ async def messages(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     action = context.user_data.get("action")
+
     if not action:
         return
 
@@ -189,6 +515,31 @@ async def messages(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if not value:
         await update.message.reply_text("Please enter a valid value.")
+        return
+
+    if action == "order_player":
+        context.user_data["player_id"] = value
+        context.user_data["action"] = "order_server"
+
+        await update.message.reply_text("Enter Server ID:")
+        return
+
+    if action == "order_server":
+        context.user_data["server_id"] = value
+        context.user_data["action"] = None
+
+        keyboard = [
+            [InlineKeyboardButton(name, callback_data=f"ordercat:{key}")]
+            for key, name in CATEGORIES.items()
+        ]
+        keyboard.append([
+            InlineKeyboardButton("⬅️ Back", callback_data="orders")
+        ])
+
+        await update.message.reply_text(
+            "Select Diamond Category:",
+            reply_markup=InlineKeyboardMarkup(keyboard)
+        )
         return
 
     category = context.user_data.get("category", "normal")
@@ -311,7 +662,6 @@ async def messages(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 def main():
-    # Initialize and migrate database
     conn = db()
     conn.close()
 
@@ -334,4 +684,4 @@ def main():
 
 if __name__ == "__main__":
     main()
-            
+        
